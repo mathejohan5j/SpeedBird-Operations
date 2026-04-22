@@ -1,0 +1,1333 @@
+import os
+import re
+import sys
+import random
+import sqlite3
+from datetime import datetime
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+# ─── Brand Assets ─────────────────────────────────────────────────────────────
+
+BRAND_COLOR = 0x22194D
+POLL_COLOR = 0x075AAA
+
+IMG_BANNER = "attached_assets/Screenshot_2026-04-19_231640_1776632187927.png"
+IMG_LOGO = "attached_assets/Untitled_design_(11)_1776632214719.png"
+IMG_POLL_LOGO = "attached_assets/Untitled_design_(11)_1776669787401.png"
+IMG_POLL_BANNER = "attached_assets/Screenshot_2026-04-19_231640_1776670266994.png"
+
+REVIEW_CHANNEL_ID = 1493971507188338830
+STAR_EMOJI = "<:star:1496459211733991545>"
+
+
+def brand_files():
+    """Return brand files, skip if they don't exist."""
+    files = []
+    try:
+        if os.path.exists(IMG_BANNER):
+            files.append(discord.File(IMG_BANNER, filename="banner.png"))
+        if os.path.exists(IMG_LOGO):
+            files.append(discord.File(IMG_LOGO, filename="logo.png"))
+    except Exception as e:
+        print(f"⚠️ Warning: Could not load brand files: {e}")
+    return files
+
+
+def poll_files():
+    """Return poll files, skip if they don't exist."""
+    files = []
+    try:
+        if os.path.exists(IMG_POLL_LOGO):
+            files.append(discord.File(IMG_POLL_LOGO, filename="poll_logo.png"))
+        if os.path.exists(IMG_POLL_BANNER):
+            files.append(discord.File(IMG_POLL_BANNER, filename="poll_banner.png"))
+    except Exception as e:
+        print(f"⚠️ Warning: Could not load poll files: {e}")
+    return files
+
+
+def brand_embed(**kwargs) -> discord.Embed:
+    embed = discord.Embed(color=BRAND_COLOR, **kwargs)
+    if os.path.exists(IMG_LOGO):
+        embed.set_thumbnail(url="attachment://logo.png")
+    if os.path.exists(IMG_BANNER):
+        embed.set_image(url="attachment://banner.png")
+    return embed
+
+
+# ─── Database Setup ───────────────────────────────────────────────────────────
+
+DB_PATH = "airline.db"
+
+
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS warnings (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id     TEXT NOT NULL,
+            user_id      TEXT NOT NULL,
+            moderator_id TEXT NOT NULL,
+            reason       TEXT NOT NULL,
+            timestamp    TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS pilots (
+            user_id       TEXT NOT NULL,
+            guild_id      TEXT NOT NULL,
+            callsign      TEXT,
+            flight_hours  REAL    DEFAULT 0,
+            flights       INTEGER DEFAULT 0,
+            miles         REAL    DEFAULT 0,
+            balance       REAL    DEFAULT 0,
+            registered_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, guild_id)
+        );
+        CREATE TABLE IF NOT EXISTS active_contracts (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id    TEXT NOT NULL,
+            pilot_id    TEXT NOT NULL,
+            departure   TEXT NOT NULL,
+            arrival     TEXT NOT NULL,
+            aircraft    TEXT NOT NULL,
+            distance    REAL NOT NULL,
+            pay         REAL NOT NULL,
+            difficulty  TEXT NOT NULL,
+            accepted_at TEXT NOT NULL
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+
+# ─── Static Data ──────────────────────────────────────────────────────────────
+
+RANKS = [
+    {"name": "Student Pilot", "min_hours": 0, "emoji": "🎓"},
+    {"name": "Second Officer", "min_hours": 25, "emoji": "🪄"},
+    {"name": "First Officer", "min_hours": 100, "emoji": "🥈"},
+    {"name": "Captain", "min_hours": 300, "emoji": "✈️"},
+    {"name": "Senior Captain", "min_hours": 750, "emoji": "🥇"},
+    {"name": "Chief Pilot", "min_hours": 1500, "emoji": "👑"},
+]
+
+FLEET = [
+    {'id': 'A320',   'type': 'Airbus A320',                        'access': 'BAW Cadet, Second Officer'},
+    {'id': 'A320SL', 'type': 'Airbus A320 Special Livery "BA WORLD"', 'access': 'BAW Cadet, Second Officer'},
+    {'id': 'B757',   'type': 'Boeing 757',                         'access': 'First Officer, Senior First Officer'},
+    {'id': 'B787',   'type': 'Boeing 787',                         'access': 'Captain'},
+    {'id': 'B777',   'type': 'Boeing 777',                         'access': 'Senior Captain, Deputy Chief Pilot'},
+]
+
+ROUTES = [
+    {
+        "flight_number": "VA001",
+        "departure": "KJFK",
+        "arrival": "KLAX",
+        "distance_nm": 2469,
+        "aircraft": "Boeing 787-9",
+        "duration_h": 5.5,
+    },
+    {
+        "flight_number": "VA002",
+        "departure": "EGLL",
+        "arrival": "KJFK",
+        "distance_nm": 3459,
+        "aircraft": "Airbus A350-900",
+        "duration_h": 7.2,
+    },
+    {
+        "flight_number": "VA003",
+        "departure": "KLAX",
+        "arrival": "RJTT",
+        "distance_nm": 5478,
+        "aircraft": "Boeing 777-300ER",
+        "duration_h": 11.0,
+    },
+    {
+        "flight_number": "VA004",
+        "departure": "YSSY",
+        "arrival": "WSSS",
+        "distance_nm": 3915,
+        "aircraft": "Airbus A350-900",
+        "duration_h": 8.1,
+    },
+    {
+        "flight_number": "VA005",
+        "departure": "KJFK",
+        "arrival": "EGLL",
+        "distance_nm": 3459,
+        "aircraft": "Boeing 787-9",
+        "duration_h": 7.0,
+    },
+    {
+        "flight_number": "VA006",
+        "departure": "KORD",
+        "arrival": "KDFW",
+        "distance_nm": 802,
+        "aircraft": "Boeing 737-800",
+        "duration_h": 2.0,
+    },
+    {
+        "flight_number": "VA007",
+        "departure": "KATL",
+        "arrival": "KMIA",
+        "distance_nm": 595,
+        "aircraft": "Embraer E175",
+        "duration_h": 1.5,
+    },
+    {
+        "flight_number": "VA008",
+        "departure": "EHAM",
+        "arrival": "LEMD",
+        "distance_nm": 1090,
+        "aircraft": "Airbus A320neo",
+        "duration_h": 2.6,
+    },
+]
+
+CONTRACTS = [
+    {
+        "id": 1,
+        "departure": "KJFK",
+        "arrival": "KBOS",
+        "aircraft": "Embraer E175",
+        "distance": 187,
+        "pay": 1200,
+        "difficulty": "easy",
+    },
+    {
+        "id": 2,
+        "departure": "KLAX",
+        "arrival": "KSFO",
+        "aircraft": "Boeing 737-800",
+        "distance": 337,
+        "pay": 2100,
+        "difficulty": "easy",
+    },
+    {
+        "id": 3,
+        "departure": "KORD",
+        "arrival": "KJFK",
+        "aircraft": "Airbus A320neo",
+        "distance": 741,
+        "pay": 4800,
+        "difficulty": "normal",
+    },
+    {
+        "id": 4,
+        "departure": "KATL",
+        "arrival": "KLAX",
+        "aircraft": "Boeing 737-800",
+        "distance": 1946,
+        "pay": 9500,
+        "difficulty": "normal",
+    },
+    {
+        "id": 5,
+        "departure": "EGLL",
+        "arrival": "EHAM",
+        "aircraft": "Airbus A220-300",
+        "distance": 368,
+        "pay": 3200,
+        "difficulty": "easy",
+    },
+    {
+        "id": 6,
+        "departure": "KJFK",
+        "arrival": "EGLL",
+        "aircraft": "Boeing 787-9",
+        "distance": 3459,
+        "pay": 18000,
+        "difficulty": "hard",
+    },
+    {
+        "id": 7,
+        "departure": "KLAX",
+        "arrival": "RJTT",
+        "aircraft": "Boeing 777-300ER",
+        "distance": 5478,
+        "pay": 28000,
+        "difficulty": "expert",
+    },
+    {
+        "id": 8,
+        "departure": "YSSY",
+        "arrival": "KLAX",
+        "aircraft": "Airbus A350-900",
+        "distance": 7488,
+        "pay": 35000,
+        "difficulty": "expert",
+    },
+]
+
+TRIVIA = [
+    {
+        "q": "What does ICAO stand for?",
+        "a": "International Civil Aviation Organization",
+    },
+    {
+        "q": "What is the standard cruising altitude for most commercial jets?",
+        "a": "Between 35,000 and 42,000 feet (FL350–FL420)",
+    },
+    {"q": "What does VFR stand for?", "a": "Visual Flight Rules"},
+    {"q": 'What is the phonetic alphabet word for the letter "A"?', "a": "Alpha"},
+    {
+        "q": "What is the speed of sound at sea level called?",
+        "a": "Mach 1 (approximately 761 mph / 1,225 km/h)",
+    },
+    {"q": "What does ATC stand for?", "a": "Air Traffic Control"},
+    {
+        "q": 'What is a "go-around"?',
+        "a": "An aborted landing where the aircraft climbs away to attempt another approach",
+    },
+    {
+        "q": "What does QNH mean on an altimeter setting?",
+        "a": "The atmospheric pressure adjusted to mean sea level",
+    },
+    {
+        "q": "What is the difference between IFR and VFR?",
+        "a": "IFR uses instruments in low visibility; VFR requires clear conditions",
+    },
+    {
+        "q": 'What does "squawk 7700" mean?',
+        "a": "The emergency transponder code indicating an aircraft is in distress",
+    },
+    {
+        "q": "What is a METAR?",
+        "a": "A routine aviation weather report issued at regular intervals",
+    },
+    {"q": "Which airport has the ICAO code EGLL?", "a": "London Heathrow Airport"},
+    {"q": "What does FMS stand for in aviation?", "a": "Flight Management System"},
+    {
+        "q": 'What is the "coffin corner" in aviation?',
+        "a": "A narrow airspeed range at altitude where stall and overspeed margins nearly overlap",
+    },
+    {
+        "q": "What is an ILS?",
+        "a": "Instrument Landing System — a precision radio navigation system for landing",
+    },
+]
+
+EIGHTBALL = [
+    "It is certain.",
+    "It is decidedly so.",
+    "Without a doubt.",
+    "Yes, definitely.",
+    "You may rely on it.",
+    "As I see it, yes.",
+    "Most likely.",
+    "Outlook good.",
+    "Yes.",
+    "Signs point to yes.",
+    "Reply hazy, try again.",
+    "Ask again later.",
+    "Better not tell you now.",
+    "Cannot predict now.",
+    "Concentrate and ask again.",
+    "Don't count on it.",
+    "My reply is no.",
+    "My sources say no.",
+    "Outlook not so good.",
+    "Very doubtful.",
+]
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def get_rank(hours: float) -> dict:
+    rank = RANKS[0]
+    for r in RANKS:
+        if hours >= r["min_hours"]:
+            rank = r
+    return rank
+
+
+STATUS_EMOJI = {
+    "available": "🟢",
+    "in_flight": "🔵",
+    "maintenance": "🔧",
+    "retired": "⚫",
+}
+
+DIFF_EMOJI = {"easy": "🟢", "normal": "🔵", "hard": "🟠", "expert": "🔴"}
+
+# ─── Slur Filter ──────────────────────────────────────────────────────────────
+
+_LEET: dict = {
+    ord('0'): 'o', ord('1'): 'i', ord('3'): 'e', ord('4'): 'a',
+    ord('5'): 's', ord('6'): 'g', ord('7'): 't', ord('8'): 'b',
+    ord('9'): 'g', ord('@'): 'a', ord('$'): 's', ord('!'): 'i',
+    ord('+'): 't', ord('|'): 'i', ord('*'): '',
+}
+
+SLUR_LIST = [
+    'nigger', 'nigga', 'faggot', 'kike', 'chink', 'spic', 'wetback',
+    'beaner', 'gook', 'coon', 'sandnigger', 'towelhead', 'tranny',
+]
+
+
+def _normalize(text: str) -> str:
+    text = text.lower().translate(_LEET)
+    return re.sub(r'[^a-z]', '', text)
+
+
+def _contains_slur(text: str) -> bool:
+    clean = _normalize(text)
+    return any(slur in clean for slur in SLUR_LIST)
+
+
+# ─── Bot Setup ────────────────────────────────────────────────────────────────
+
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# ─── Events ───────────────────────────────────────────────────────────────────
+
+
+@bot.event
+async def on_ready():
+    """Bot startup event."""
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Logged in as {bot.user} (ID: {bot.user.id})")
+        print(f"✅ Synced {len(synced)} command(s)")
+        await bot.change_presence(
+            activity=discord.Activity(
+                type=discord.ActivityType.watching, name="the skies ✈️"
+            )
+        )
+    except Exception as e:
+        print(f"❌ Failed to sync commands: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot or not message.guild:
+        return
+    if not _contains_slur(message.content):
+        return
+
+    # Delete the offending message first
+    try:
+        await message.delete()
+    except (discord.NotFound, discord.Forbidden):
+        pass
+
+    # DM the user an appeal notice before the ban removes shared guild
+    appeal_embed = discord.Embed(color=BRAND_COLOR)
+    appeal_embed.description = (
+        f'## You have been banned from British Airways Virtual PF\n\n'
+        f'> Your account has been **permanently banned** from **British Airways Virtual PF** '
+        f'for sending a message that contained hate speech or a racial/discriminatory slur.\n\n'
+        f'We operate a **zero-tolerance policy** on hate speech. This action was taken automatically.\n\n'
+        f'**To appeal your ban**, please contact a Senior Staff member through an alternate account '
+        f'or reach out via the BA Virtual community channels.\n\n'
+        f'-# *Attempting to rejoin without completing an appeal will result in an immediate re-ban.*\n\n'
+        f'-# © British Airways Virtual PF. All rights reserved.'
+    )
+    try:
+        await message.author.send(embed=appeal_embed)
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+    # Execute the ban
+    try:
+        await message.guild.ban(
+            message.author,
+            reason='Zero-tolerance: hate speech / discriminatory slur detected (automatic)',
+            delete_message_days=1,
+        )
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+
+# ─── MODERATION ───────────────────────────────────────────────────────────────
+
+
+@bot.tree.command(name="ban", description="Ban a user from the server")
+@app_commands.describe(user="The user to ban", reason="Reason for the ban")
+@app_commands.checks.has_permissions(ban_members=True)
+async def ban(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    reason: str = "No reason provided",
+):
+    if user.top_role >= interaction.user.top_role:
+        await interaction.response.send_message(
+            "❌ You cannot ban someone with an equal or higher role.", ephemeral=True
+        )
+        return
+    await user.ban(reason=reason)
+    embed = brand_embed(title="User Banned <:warning:1495058284208722010>")
+    embed.description = (
+        f"> The user {user.mention} has been permanently banned from the server.\n"
+        f"> **Reason:** {reason}\n"
+        f"> **Actioned by:** {interaction.user.mention}\n\n"
+        f"We take the safety and wellbeing of our community very seriously.\n\n"
+        f"-# *If you believe this was a mistake, please contact a member of staff.*\n\n"
+        f"-# © British Airways Virtual PF. All rights reserved."
+    )
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+@bot.tree.command(name="kick", description="Kick a user from the server")
+@app_commands.describe(user="The user to kick", reason="Reason for the kick")
+@app_commands.checks.has_permissions(kick_members=True)
+async def kick(
+    interaction: discord.Interaction,
+    user: discord.Member,
+    reason: str = "No reason provided",
+):
+    if user.top_role >= interaction.user.top_role:
+        await interaction.response.send_message(
+            "❌ You cannot kick someone with an equal or higher role.", ephemeral=True
+        )
+        return
+    await user.kick(reason=reason)
+    embed = brand_embed(title="User Kicked <:warning:1495058284208722010>")
+    embed.description = (
+        f"> The user {user.mention} has been kicked from the server.\n"
+        f"> **Reason:** {reason}\n"
+        f"> **Actioned by:** {interaction.user.mention}\n\n"
+        f"They are welcome to rejoin, but we ask that everyone please respect our community guidelines.\n\n"
+        f"-# *If you have any further questions, we will be more than happy to answer them!*\n\n"
+        f"-# © British Airways Virtual PF. All rights reserved."
+    )
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+@bot.tree.command(name="warn", description="Issue a warning to a user")
+@app_commands.describe(user="The user to warn", reason="Reason for the warning")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def warn(interaction: discord.Interaction, user: discord.Member, reason: str):
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO warnings (guild_id, user_id, moderator_id, reason, timestamp) VALUES (?, ?, ?, ?, ?)",
+        (
+            str(interaction.guild_id),
+            str(user.id),
+            str(interaction.user.id),
+            reason,
+            datetime.utcnow().isoformat(),
+        ),
+    )
+    conn.commit()
+    count = conn.execute(
+        "SELECT COUNT(*) FROM warnings WHERE guild_id=? AND user_id=?",
+        (str(interaction.guild_id), str(user.id)),
+    ).fetchone()[0]
+    conn.close()
+
+    embed = brand_embed(title="User Warning <:warning:1495058284208722010>")
+    embed.description = (
+        f"> The user {user.mention} has received a warning. They now have a total of **{count}** warning(s).\n\n"
+        f"Please be respectful to everyone in this server, we hate to discipline you and we trust you. "
+        f"But we can all do better.\n\n"
+        f"-# *If you have any further questions, we will be more than happy to answer them!*\n\n"
+        f"-# © British Airways Virtual PF. All rights reserved."
+    )
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+@bot.tree.command(name="warnings", description="View a user's warnings")
+@app_commands.describe(user="The user to check")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def warnings(interaction: discord.Interaction, user: discord.Member):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM warnings WHERE guild_id=? AND user_id=? ORDER BY timestamp DESC",
+        (str(interaction.guild_id), str(user.id)),
+    ).fetchall()
+    conn.close()
+    embed = brand_embed(title="Warning History <:warning:1495058284208722010>")
+    if not rows:
+        embed.description = (
+            f"> {user.mention} has a clean record — no warnings on file.\n\n"
+            f"-# *Keep up the great behaviour!*\n\n"
+            f"-# © British Airways Virtual PF. All rights reserved."
+        )
+    else:
+        warning_lines = []
+        for i, row in enumerate(rows, 1):
+            mod = interaction.guild.get_member(int(row["moderator_id"]))
+            mod_str = mod.mention if mod else f"<@{row['moderator_id']}>"
+            warning_lines.append(
+                f"> **Warning #{i}** — {row['timestamp'][:10]}\n"
+                f"> Reason: {row['reason']} · By: {mod_str}"
+            )
+        embed.description = (
+            f"> {user.mention} has **{len(rows)}** warning(s) on record.\n\n"
+            + "\n\n".join(warning_lines)
+            + f"\n\n-# *If you have any further questions, we will be more than happy to answer them!*\n\n"
+            f"-# © British Airways Virtual PF. All rights reserved."
+        )
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+@bot.tree.command(name="clearwarnings", description="Clear all warnings for a user")
+@app_commands.describe(user="The user to clear warnings for")
+@app_commands.checks.has_permissions(manage_messages=True)
+async def clearwarnings(interaction: discord.Interaction, user: discord.Member):
+    conn = get_db()
+    conn.execute(
+        "DELETE FROM warnings WHERE guild_id=? AND user_id=?",
+        (str(interaction.guild_id), str(user.id)),
+    )
+    conn.commit()
+    conn.close()
+    embed = brand_embed(title="Warnings Cleared <:rules:1495058087327957022>")
+    embed.description = (
+        f"> All warnings for {user.mention} have been successfully removed from the record.\n\n"
+        f"We trust this is a fresh start please continue to be a valued member of our community.\n\n"
+        f"-# *If you have any further questions, we will be more than happy to answer them!*\n\n"
+        f"-# © British Airways Virtual PF. All rights reserved."
+    )
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+@bot.tree.command(name="slowmode", description="Set slowmode for the current channel")
+@app_commands.describe(seconds="Slowmode duration in seconds (0 to disable)")
+@app_commands.checks.has_permissions(manage_channels=True)
+async def slowmode(interaction: discord.Interaction, seconds: int):
+    if seconds < 0 or seconds > 21600:
+        await interaction.response.send_message(
+            "❌ Slowmode must be between 0 and 21600 seconds.", ephemeral=True
+        )
+        return
+    await interaction.channel.edit(slowmode_delay=seconds)
+    embed = brand_embed(title="Slowmode")
+    if seconds == 0:
+        embed.description = (
+            f"> Slowmode has been turned off in this channel. Members can now send messages freely.\n\n"
+            f"-# *If you have any further questions, we will be more than happy to answer them!*\n\n"
+            f"-# © British Airways Virtual PF. All rights reserved."
+        )
+    else:
+        embed.description = (
+            f"> Slowmode has been set to **{seconds} second(s)** in this channel.\n\n"
+            f"Please be patient and take turns, we want everyone to have a chance to participate.\n\n"
+            f"-# *If you have any further questions, we will be more than happy to answer them!*\n\n"
+            f"-# © British Airways Virtual PF. All rights reserved."
+        )
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+# ─── FUN ──────────────────────────────────────────────────────────────────────
+ARROW = '<:Arrow:1495725235180277760>'
+
+
+@bot.tree.command(name="poll", description="Create a poll")
+@app_commands.describe(
+    question="The poll question",
+    option1="Option 1",
+    option2="Option 2",
+    option3="Option 3 (optional)",
+    option4="Option 4 (optional)",
+    option5="Option 5 (optional)",
+)
+async def poll(
+    interaction: discord.Interaction,
+    question: str,
+    option1: str,
+    option2: str,
+    option3: str = None,
+    option4: str = None,
+    option5: str = None,
+):
+    all_opts = [option1, option2, option3, option4, option5]
+    opts = [o for o in all_opts if o]
+    option_lines = "\n".join(f"> {ARROW} {opt}" for opt in opts)
+    number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]
+
+    embed = discord.Embed(color=POLL_COLOR)
+    if os.path.exists(IMG_POLL_LOGO):
+        embed.set_thumbnail(url="attachment://poll_logo.png")
+    if os.path.exists(IMG_POLL_BANNER):
+        embed.set_image(url="attachment://poll_banner.png")
+    embed.description = (
+        f"# <:poll:1495503783957102804> Poll\n\n"
+        f"## {question}\n\n"
+        f"### What is your preferred choice?\n\n"
+        f"{option_lines}\n\n"
+        f"-# **Thank you for your answer, your opinion will add to the way British Airways Virtual's Path in Project Flight will be carved. Thank you.**\n\n"
+        f"-# © British Airways Virtual PF. All rights reserved."
+    )
+    await interaction.response.send_message(embed=embed, files=poll_files())
+    msg = await interaction.original_response()
+    for i in range(len(opts)):
+        await msg.add_reaction(number_emojis[i])
+
+
+# ─────────────────────────────────UTILITY───────────────────────────────────
+
+
+@bot.tree.command(name="ping", description="Check if the bot is online")
+async def ping(interaction: discord.Interaction):
+    embed = brand_embed(title='🏓 Pong!')
+    embed.description = '-# © British Airways Virtual PF. All rights reserved.'
+    embed.add_field(name='Latency',    value=f'> {round(bot.latency * 1000)}ms',           inline=True)
+    embed.add_field(name='Bot Status', value='> Online <:Check:1495698193147756684>',      inline=True)
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+@bot.tree.command(name="serverinfo", description="Get information about the server")
+async def serverinfo(interaction: discord.Interaction):
+    g = interaction.guild
+    embed = brand_embed(title=f"📋 {g.name}")
+    embed.add_field(name='Owner',    value='> <@779007687097712700>',                    inline=True)
+    embed.add_field(name='Website',  value='> [BAW Website.](https://pfbaw.vercel.app)', inline=True)
+    embed.add_field(name='Members',  value=f'> {g.member_count}',                        inline=True)
+    embed.add_field(name='Channels', value=f'> {len(g.channels)}',                       inline=True)
+    embed.add_field(name='Roles',    value=f'> {len(g.roles)}',                          inline=True)
+    embed.add_field(name='Boosts',   value=f'> {g.premium_subscription_count}',          inline=True)
+    embed.add_field(name='Created',  value=f'> {g.created_at.strftime("%b %d, %Y")}',    inline=True)
+    embed.description = '-# © British Airways Virtual PF. All rights reserved.'
+    embed.set_footer(text=f'Server ID: {g.id}')
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+@bot.tree.command(name="userinfo", description="Get information about a user")
+@app_commands.describe(user="The user to get info about")
+async def userinfo(interaction: discord.Interaction, user: discord.Member = None):
+    user = user or interaction.user
+    embed = brand_embed(title=f'<:robot:1495209551174303875> {user}')
+    embed.add_field(name='Nickname',       value=f'> {user.nick or "None"}',                                                     inline=True)
+    embed.add_field(name='Top Role',       value=f'> {user.top_role.mention}',                                                    inline=True)
+    embed.add_field(name='Bot',            value=f'> {"Yes" if user.bot else "No"}',                                               inline=True)
+    embed.add_field(name='Joined Server',  value=f'> {user.joined_at.strftime("%b %d, %Y") if user.joined_at else "N/A"}',        inline=True)
+    embed.add_field(name='Account Created',value=f'> {user.created_at.strftime("%b %d, %Y")}',                                    inline=True)
+    embed.description = '-# © British Airways Virtual PF. All rights reserved.'
+    embed.set_footer(text=f'User ID: {user.id}')
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+# ─── REVIEW COMMAND ───────────────────────────────────────────────────────────
+
+
+    # ─── REVIEW COMMAND ───────────────────────────────────────────────────────────
+
+    @bot.tree.command(name="review", description="Submit a review for British Airways Virtual PF")
+    @app_commands.describe(
+        rating="Your rating out of 5 stars",
+        review="Why do you like or dislike the airline?",
+    )
+    @app_commands.choices(rating=[
+        app_commands.Choice(name=f"{STAR_EMOJI} 1 Star", value=1),
+        app_commands.Choice(name=f"{STAR_EMOJI} {STAR_EMOJI} 2 Stars", value=2),
+        app_commands.Choice(name=f"{STAR_EMOJI} {STAR_EMOJI} {STAR_EMOJI} 3 Stars", value=3),
+        app_commands.Choice(name=f"{STAR_EMOJI} {STAR_EMOJI} {STAR_EMOJI} {STAR_EMOJI} 4 Stars", value=4),
+        app_commands.Choice(name=f"{STAR_EMOJI} {STAR_EMOJI} {STAR_EMOJI} {STAR_EMOJI} {STAR_EMOJI} 5 Stars", value=5),
+    ])
+    async def review(interaction: discord.Interaction, rating: int, review: str) -> None:
+        """Submit a review for British Airways Virtual PF."""
+        await interaction.response.defer(ephemeral=True)
+
+        # Validate input
+        if not review or len(review.strip()) == 0:
+            await interaction.followup.send(
+                "❌ Please provide a review.", ephemeral=True
+            )
+            return
+
+        if len(review) > 2000:
+            await interaction.followup.send(
+                "❌ Review is too long (max 2000 characters).", ephemeral=True
+            )
+            return
+
+        # Get the review channel
+        channel = interaction.guild.get_channel(REVIEW_CHANNEL_ID)
+        if not channel:
+            await interaction.followup.send(
+                "❌ Review channel not found — please contact an admin.", ephemeral=True
+            )
+            return
+
+        # Verify bot has permissions
+        if not channel.permissions_for(interaction.guild.me).send_messages:
+            await interaction.followup.send(
+                "❌ I don't have permission to post in the review channel.", ephemeral=True
+            )
+            return
+
+        try:
+            # Create the review embed
+            stars = STAR_EMOJI * rating
+            embed = brand_embed(title="New Member Review")
+            embed.description = (
+                f"## {stars}\n\n"
+                f"> {review}\n\n"
+                f"-# © British Airways Virtual PF. All rights reserved."
+            )
+            embed.add_field(
+                name="Reviewer",
+                value=f"> {interaction.user.mention}",
+                inline=True
+            )
+            embed.add_field(
+                name="Rating",
+                value=f"> {stars} ({rating}/5)",
+                inline=True
+            )
+            embed.add_field(
+                name="From",
+                value=f"> {interaction.channel.mention}",
+                inline=True
+            )
+            embed.set_footer(text=f"User ID: {interaction.user.id}")
+            embed.timestamp = discord.utils.utcnow()
+
+            # Send to review channel
+            await channel.send(embed=embed, files=brand_files())
+
+            # Confirm to user
+            await interaction.followup.send(
+                "✅ Your review has been submitted — thank you!", ephemeral=True
+            )
+
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ I don't have permission to post in the review channel.", ephemeral=True
+            )
+        except discord.HTTPException as e:
+            await interaction.followup.send(
+                f"❌ Failed to submit review: {str(e)}", ephemeral=True
+            )
+        except Exception as e:
+            await interaction.followup.send(
+                "❌ An unexpected error occurred. Please try again later.", ephemeral=True
+            )
+            print(f"Review command error: {e}")
+
+
+# ─── HELP COMMAND ─────────────────────────────────────────────────────────────
+
+
+@bot.tree.command(name="help", description="View all available commands")
+async def help_cmd(interaction: discord.Interaction):
+    embed = brand_embed(title='<:robot:1495209551174303875> Bot Commands')
+    embed.description = '-# © British Airways Virtual PF. All rights reserved.'
+    embed.add_field(
+        name='<:swords:1495058123738710106> Moderation',
+        value='> `/ban` `/kick` `/warn` `/warnings` `/clearwarnings` `/slowmode`',
+        inline=False,
+    )
+    embed.add_field(
+        name='<:gift:1495504477137015036> Fun',
+        value='> `/poll` `/trivia` `/coinflip` `/dice` `/8ball`',
+        inline=False,
+    )
+    embed.add_field(
+        name='<:wrench:1495058202063278251> Utility',
+        value='> `/ping` `/serverinfo` `/userinfo` `/review` `/help`',
+        inline=False,
+    )
+    embed.add_field(
+        name='<:clipboard:1495057662545625188> Virtual Airline — Operations',
+        value='> `/register` `/profile` `/ranks` `/stats`',
+        inline=False,
+    )
+    embed.add_field(
+        name='<:Plane:1495759889115513024> Virtual Airline — Fleet',
+        value='> `/fleet` `/aircraft`',
+        inline=False,
+    )
+    embed.add_field(
+        name='<:Arrow:1495725235180277760> Virtual Airline — Routes',
+        value='> `/routes` `/route`',
+        inline=False,
+    )
+    embed.add_field(
+        name='<:folder:1495057772805488821> Virtual Airline — Contracts',
+        value='> `/contracts` `/contract` `/acceptcontract` `/completecontract`',
+        inline=False,
+    )
+    embed.add_field(
+        name='<:poll:1495503783957102804> Virtual Airline — Leaderboard',
+        value='> `/leaderboard`',
+        inline=False,
+    )
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+# ─── VIRTUAL AIRLINE — PILOTS ─────────────────────────────────────────────────
+
+
+@bot.tree.command(name="register", description="Register as a pilot")
+@app_commands.describe(callsign="Your pilot callsign (optional)")
+async def register(interaction: discord.Interaction, callsign: str = None):
+    conn = get_db()
+    existing = conn.execute(
+        "SELECT 1 FROM pilots WHERE user_id=? AND guild_id=?",
+        (str(interaction.user.id), str(interaction.guild_id)),
+    ).fetchone()
+    if existing:
+        conn.close()
+        await interaction.response.send_message(
+            "❌ You are already registered as a pilot!", ephemeral=True
+        )
+        return
+    conn.execute(
+        "INSERT INTO pilots (user_id, guild_id, callsign, registered_at) VALUES (?, ?, ?, ?)",
+        (
+            str(interaction.user.id),
+            str(interaction.guild_id),
+            callsign,
+            datetime.utcnow().isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    embed = brand_embed(title='✅ Pilot Registered!')
+    embed.description = '-# © British Airways Virtual PF. All rights reserved.'
+    embed.add_field(name='Pilot',         value=f'> {interaction.user.mention}', inline=True)
+    embed.add_field(name='Callsign',      value=f'> {callsign or "Not set"}',    inline=True)
+    embed.add_field(name='Starting Rank', value='> BAW Cadet',                   inline=True)
+    embed.set_footer(text='Welcome to the virtual airline! Use /contracts to find your first flight.')
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+@bot.tree.command(name="profile", description="View pilot profile")
+@app_commands.describe(pilot="The pilot to view")
+async def profile(interaction: discord.Interaction, pilot: discord.Member = None):
+    pilot = pilot or interaction.user
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM pilots WHERE user_id=? AND guild_id=?",
+        (str(pilot.id), str(interaction.guild_id)),
+    ).fetchone()
+    conn.close()
+    if not row:
+        await interaction.response.send_message(
+            f"❌ {pilot.mention} is not registered as a pilot.", ephemeral=True
+        )
+        return
+    rank = get_rank(row["flight_hours"])
+    next_rank = next((r for r in RANKS if r["min_hours"] > row["flight_hours"]), None)
+    embed = brand_embed(title=pilot.display_name)
+    embed.description = '-# © British Airways Virtual PF. All rights reserved.'
+    embed.add_field(name='Callsign',     value=f'> {row["callsign"] or "Not set"}',  inline=True)
+    embed.add_field(name='Rank',         value=f'> {rank["name"]}',                   inline=True)
+    embed.add_field(name='Flight Hours', value=f'> {row["flight_hours"]:.1f}h',       inline=True)
+    embed.add_field(name='Total Flights',value=f'> {row["flights"]}',                 inline=True)
+    embed.add_field(name='Miles Flown',  value=f'> {row["miles"]:,.0f} nm',           inline=True)
+    embed.add_field(name='Balance',      value=f'> ${row["balance"]:,.0f}',           inline=True)
+    if next_rank:
+        hours_needed = next_rank["min_hours"] - row["flight_hours"]
+        embed.set_footer(
+            text=f"Next rank: {next_rank['name']} — {hours_needed:.1f}h to go"
+        )
+    else:
+        embed.set_footer(text="Maximum rank achieved! 👑")
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+@bot.tree.command(name="ranks", description="View all pilot ranks")
+async def ranks(interaction: discord.Interaction):
+    embed = brand_embed(title='BAW Pilot Ranks')
+    embed.description = (
+        f'> <@&1494334647944089600> 0 {ARROW} 25 <@&1494334604289769492>\n\n'
+        f'> <@&1494334604289769492> 25 {ARROW} 50 <@&1494334581590200340>\n\n'
+        f'> <@&1494334581590200340> 50 {ARROW} 100 <@&1494334555526664323>\n\n'
+        f'> <@&1494334555526664323> 100 {ARROW} 150 <@&1494334487591653557>\n\n'
+        f'> <@&1494334482147442819> 150 {ARROW} 200 <@&1494333401069781212>\n\n'
+        f'> <@&1494333401069781212> 200 {ARROW} 300 <@&1494333068243112096>\n\n'
+        f'-# © British Airways Virtual PF. All rights reserved.'
+    )
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+@bot.tree.command(name="stats", description="View airline statistics")
+async def stats(interaction: discord.Interaction):
+    conn = get_db()
+    total_pilots = conn.execute(
+        "SELECT COUNT(*)      FROM pilots WHERE guild_id=?",
+        (str(interaction.guild_id),),
+    ).fetchone()[0]
+    total_flights = (
+        conn.execute(
+            "SELECT SUM(flights)  FROM pilots WHERE guild_id=?",
+            (str(interaction.guild_id),),
+        ).fetchone()[0]
+        or 0
+    )
+    total_hours = (
+        conn.execute(
+            "SELECT SUM(flight_hours) FROM pilots WHERE guild_id=?",
+            (str(interaction.guild_id),),
+        ).fetchone()[0]
+        or 0
+    )
+    total_miles = (
+        conn.execute(
+            "SELECT SUM(miles)    FROM pilots WHERE guild_id=?",
+            (str(interaction.guild_id),),
+        ).fetchone()[0]
+        or 0
+    )
+    conn.close()
+    embed = brand_embed(title='📊 Airline Statistics')
+    embed.description = '-# © British Airways Virtual PF. All rights reserved.'
+    embed.add_field(name='Total Pilots',  value=f'> {total_pilots}',           inline=True)
+    embed.add_field(name='Total Flights', value=f'> {total_flights}',          inline=True)
+    embed.add_field(name='Total Hours',   value=f'> {total_hours:.1f}h',       inline=True)
+    embed.add_field(name='Total Miles',   value=f'> {total_miles:,.0f} nm',    inline=True)
+    embed.add_field(name='Fleet Size',    value=f'> {len(FLEET)}',             inline=True)
+    embed.add_field(name='Active Routes', value=f'> {len(ROUTES)}',            inline=True)
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+# ─── VIRTUAL AIRLINE — FLEET ──────────────────────────────────────────────────
+
+@bot.tree.command(name="fleet", description="View the fleet")
+async def fleet(interaction: discord.Interaction):
+    TAIL = '<:tail:1494706239148654613>'
+    embed = brand_embed(title="British Airways Fleet PF")
+    embed.description = ''
+    for a in FLEET:
+        embed.add_field(
+            name=f'{TAIL} {a["type"]}',
+            value=f'> Accessible by: {a["access"]}',
+            inline=False,
+        )
+    embed.description += '-# © British Airways Virtual PF. All rights reserved.'
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+@bot.tree.command(name="aircraft", description="View aircraft details")
+@app_commands.describe(aircraft_id="Aircraft ID (e.g. A320)")
+async def aircraft(interaction: discord.Interaction, aircraft_id: str):
+    a = next(
+        (x for x in FLEET if x["id"].upper() == aircraft_id.upper()), None
+    )
+    if not a:
+        await interaction.response.send_message(
+            f"❌ Aircraft `{aircraft_id}` not found. Use `/fleet` to see all aircraft.",
+            ephemeral=True,
+        )
+        return
+    embed = brand_embed(title=f"{a['type']}")
+    embed.description = '-# © British Airways Virtual PF. All rights reserved.'
+    embed.add_field(name="Type", value=f"> {a['type']}", inline=True)
+    embed.add_field(name="ID", value=f"> {a['id']}", inline=True)
+    embed.add_field(name="Access", value=f"> {a['access']}", inline=True)
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+# ─── VIRTUAL AIRLINE — ROUTES ─────────────────────────────────────────────────
+
+
+@bot.tree.command(name="routes", description="View available routes")
+@app_commands.describe(departure="Filter by departure ICAO (e.g. KJFK)")
+async def routes(interaction: discord.Interaction, departure: str = None):
+    route_list = [
+        r
+        for r in ROUTES
+        if departure is None or r["departure"].upper() == departure.upper()
+    ]
+    embed = brand_embed(title='Available Routes')
+    embed.description = '-# © British Airways Virtual PF. All rights reserved.'
+    if not route_list:
+        embed.description = f'No routes found departing from `{departure}`.\n\n-# © British Airways Virtual PF. All rights reserved.'
+    else:
+        for r in route_list:
+            embed.add_field(
+                name=f'{ARROW} {r["flight_number"]}: {r["departure"]} → {r["arrival"]}',
+                value=f'> Aircraft: {r["aircraft"]} | Distance: {r["distance_nm"]:,} nm | Duration: ~{r["duration_h"]}h',
+                inline=False,
+            )
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+@bot.tree.command(name="route", description="View route details")
+@app_commands.describe(flight_number="Flight number (e.g. VA001)")
+async def route(interaction: discord.Interaction, flight_number: str):
+    r = next(
+        (x for x in ROUTES if x["flight_number"].upper() == flight_number.upper()), None
+    )
+    if not r:
+        await interaction.response.send_message(
+            f"❌ Route `{flight_number}` not found. Use `/routes` to see all routes.",
+            ephemeral=True,
+        )
+        return
+    embed = brand_embed(title=f'{r["flight_number"]}: {r["departure"]} → {r["arrival"]}')
+    embed.description = '-# © British Airways Virtual PF. All rights reserved.'
+    embed.add_field(name='Departure',     value=f'> {r["departure"]}',          inline=True)
+    embed.add_field(name='Arrival',       value=f'> {r["arrival"]}',            inline=True)
+    embed.add_field(name='Aircraft',      value=f'> {r["aircraft"]}',           inline=True)
+    embed.add_field(name='Distance',      value=f'> {r["distance_nm"]:,} nm',   inline=True)
+    embed.add_field(name='Est. Duration', value=f'> ~{r["duration_h"]}h',       inline=True)
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+# ─── VIRTUAL AIRLINE — CONTRACTS ─────────────────────────────────────────────
+
+
+@bot.tree.command(name="contracts", description="View available contracts")
+@app_commands.describe(difficulty="Filter by difficulty")
+@app_commands.choices(
+    difficulty=[
+        app_commands.Choice(name="Easy", value="easy"),
+        app_commands.Choice(name="Normal", value="normal"),
+        app_commands.Choice(name="Hard", value="hard"),
+        app_commands.Choice(name="Expert", value="expert"),
+    ]
+)
+async def contracts(interaction: discord.Interaction, difficulty: str = None):
+    contract_list = [
+        c for c in CONTRACTS if difficulty is None or c["difficulty"] == difficulty
+    ]
+    embed = brand_embed(title='Available Contracts')
+    embed.description = '-# © British Airways Virtual PF. All rights reserved.'
+    if not contract_list:
+        embed.description = 'No contracts found.\n\n-# © British Airways Virtual PF. All rights reserved.'
+    else:
+        for c in contract_list:
+            embed.add_field(
+                name=f'Contract #{c["id"]}: {c["departure"]} → {c["arrival"]}',
+                value=f'> Aircraft: {c["aircraft"]} | Distance: {c["distance"]:,} nm | Pay: **${c["pay"]:,}** | {DIFF_EMOJI.get(c["difficulty"], "")} {c["difficulty"].title()}',
+                inline=False,
+            )
+    embed.set_footer(text='Use /acceptcontract <id> to accept a contract.')
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+@bot.tree.command(name="contract", description="View contract details")
+@app_commands.describe(contract_id="Contract ID")
+async def contract(interaction: discord.Interaction, contract_id: int):
+    c = next((x for x in CONTRACTS if x["id"] == contract_id), None)
+    if not c:
+        await interaction.response.send_message(
+            f"❌ Contract #{contract_id} not found. Use `/contracts` to see all contracts.",
+            ephemeral=True,
+        )
+        return
+    embed = brand_embed(title=f'Contract #{c["id"]}: {c["departure"]} → {c["arrival"]}')
+    embed.description = '-# © British Airways Virtual PF. All rights reserved.'
+    embed.add_field(name='Departure',  value=f'> {c["departure"]}',          inline=True)
+    embed.add_field(name='Arrival',    value=f'> {c["arrival"]}',            inline=True)
+    embed.add_field(name='Difficulty', value=f'> {DIFF_EMOJI.get(c["difficulty"], "")} {c["difficulty"].title()}', inline=True)
+    embed.add_field(name='Aircraft',   value=f'> {c["aircraft"]}',           inline=True)
+    embed.add_field(name='Distance',   value=f'> {c["distance"]:,} nm',      inline=True)
+    embed.add_field(name='Pay',        value=f'> ${c["pay"]:,}',             inline=True)
+    embed.set_footer(text=f'Use /acceptcontract {c["id"]} to accept this contract.')
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+@bot.tree.command(name="acceptcontract", description="Accept a contract")
+@app_commands.describe(contract_id="Contract ID")
+async def acceptcontract(interaction: discord.Interaction, contract_id: int):
+    conn = get_db()
+    pilot = conn.execute(
+        "SELECT 1 FROM pilots WHERE user_id=? AND guild_id=?",
+        (str(interaction.user.id), str(interaction.guild_id)),
+    ).fetchone()
+    if not pilot:
+        conn.close()
+        await interaction.response.send_message(
+            "❌ You need to `/register` as a pilot first.", ephemeral=True
+        )
+        return
+    active = conn.execute(
+        "SELECT 1 FROM active_contracts WHERE pilot_id=? AND guild_id=?",
+        (str(interaction.user.id), str(interaction.guild_id)),
+    ).fetchone()
+    if active:
+        conn.close()
+        await interaction.response.send_message(
+            "❌ You already have an active contract. Use `/completecontract` to finish it first.",
+            ephemeral=True,
+        )
+        return
+    c = next((x for x in CONTRACTS if x["id"] == contract_id), None)
+    if not c:
+        conn.close()
+        await interaction.response.send_message(
+            f"❌ Contract #{contract_id} not found.", ephemeral=True
+        )
+        return
+    conn.execute(
+        "INSERT INTO active_contracts (guild_id, pilot_id, departure, arrival, aircraft, distance, pay, difficulty, accepted_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            str(interaction.guild_id),
+            str(interaction.user.id),
+            c["departure"],
+            c["arrival"],
+            c["aircraft"],
+            c["distance"],
+            c["pay"],
+            c["difficulty"],
+            datetime.utcnow().isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    embed = brand_embed(title=f'✅ Contract #{contract_id} Accepted!')
+    embed.description = '-# © British Airways Virtual PF. All rights reserved.'
+    embed.add_field(name='Route',             value=f'> {c["departure"]} → {c["arrival"]}', inline=True)
+    embed.add_field(name='Aircraft',          value=f'> {c["aircraft"]}',                   inline=True)
+    embed.add_field(name='Difficulty',        value=f'> {DIFF_EMOJI.get(c["difficulty"], "")} {c["difficulty"].title()}',          inline=True)
+    embed.add_field(name='Pay on Completion', value=f'> ${c["pay"]:,}',                     inline=True)
+    embed.set_footer(text=f'Use /completecontract {contract_id} <flight_time> when you land!')
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+@bot.tree.command(name="completecontract", description="Complete an assigned contract")
+@app_commands.describe(
+    contract_id="Contract ID",
+    flight_time="Flight time in hours",
+    landing_rate="Landing rate in fpm (optional)",
+)
+async def completecontract(
+    interaction: discord.Interaction,
+    contract_id: int,
+    flight_time: float,
+    landing_rate: int = None,
+):
+    conn = get_db()
+    pilot = conn.execute(
+        "SELECT * FROM pilots WHERE user_id=? AND guild_id=?",
+        (str(interaction.user.id), str(interaction.guild_id)),
+    ).fetchone()
+    if not pilot:
+        conn.close()
+        await interaction.response.send_message(
+            "❌ You are not registered as a pilot.", ephemeral=True
+        )
+        return
+    active = conn.execute(
+        "SELECT * FROM active_contracts WHERE pilot_id=? AND guild_id=?",
+        (str(interaction.user.id), str(interaction.guild_id)),
+    ).fetchone()
+    if not active or active["id"] != contract_id:
+        conn.close()
+        await interaction.response.send_message(
+            f"❌ You do not have contract #{contract_id} active.", ephemeral=True
+        )
+        return
+    new_hours = pilot["flight_hours"] + flight_time
+    new_flights = pilot["flights"] + 1
+    new_miles = pilot["miles"] + active["distance"]
+    new_balance = pilot["balance"] + active["pay"]
+    conn.execute(
+        "UPDATE pilots SET flight_hours=?, flights=?, miles=?, balance=? WHERE user_id=? AND guild_id=?",
+        (
+            new_hours,
+            new_flights,
+            new_miles,
+            new_balance,
+            str(interaction.user.id),
+            str(interaction.guild_id),
+        ),
+    )
+    conn.execute("DELETE FROM active_contracts WHERE id=?", (contract_id,))
+    conn.commit()
+    conn.close()
+    old_rank = get_rank(pilot["flight_hours"])
+    new_rank = get_rank(new_hours)
+    embed = brand_embed(title=f'Contract #{contract_id} Completed!')
+    embed.description = '-# © British Airways Virtual PF. All rights reserved.'
+    embed.add_field(name='Route',         value=f'> {active["departure"]} → {active["arrival"]}', inline=True)
+    embed.add_field(name='Flight Time',   value=f'> {flight_time:.1f}h',                          inline=True)
+    embed.add_field(name='Distance',      value=f'> {active["distance"]:,} nm',                   inline=True)
+    embed.add_field(name='Earnings',      value=f'> **${active["pay"]:,}**',                      inline=True)
+    embed.add_field(name='Total Hours',   value=f'> {new_hours:.1f}h',                            inline=True)
+    embed.add_field(name='Total Balance', value=f'> ${new_balance:,.0f}',                         inline=True)
+    if landing_rate is not None:
+        embed.add_field(name='Landing Rate', value=f'> {landing_rate} fpm', inline=True)
+    if old_rank['name'] != new_rank['name']:
+        embed.add_field(
+            name='Rank Up!',
+            value=f'> {old_rank["emoji"]} {old_rank["name"]} → {new_rank["emoji"]} {new_rank["name"]}',
+            inline=False,
+        )
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+# ─── VIRTUAL AIRLINE — LEADERBOARD ───────────────────────────────────────────
+
+
+@bot.tree.command(name="leaderboard", description="View pilot leaderboards")
+@app_commands.describe(category="Leaderboard category")
+@app_commands.choices(
+    category=[
+        app_commands.Choice(name="Flight Hours", value="hours"),
+        app_commands.Choice(name="Total Flights", value="flights"),
+        app_commands.Choice(name="Miles Flown", value="miles"),
+        app_commands.Choice(name="Earnings", value="balance"),
+    ]
+)
+async def leaderboard(interaction: discord.Interaction, category: str = "hours"):
+    column_map = {
+        "hours": ("flight_hours", "Flight Hours", "🕐"),
+        "flights": ("flights", "Total Flights", "✈️"),
+        "miles": ("miles", "Miles Flown", "🗺️"),
+        "balance": ("balance", "Earnings", "💰"),
+    }
+    col, label, emoji = column_map[category]
+    conn = get_db()
+    rows = conn.execute(
+        f"SELECT * FROM pilots WHERE guild_id=? ORDER BY {col} DESC LIMIT 10",
+        (str(interaction.guild_id),),
+    ).fetchall()
+    conn.close()
+    embed = brand_embed(title=f'{emoji} Leaderboard — {label}')
+    if not rows:
+        embed.description = 'No pilots registered yet. Use `/register` to join!\n\n-# © British Airways Virtual PF. All rights reserved.'
+    else:
+        medals = ['🥇', '🥈', '🥉']
+        lines = []
+        for i, row in enumerate(rows):
+            member = interaction.guild.get_member(int(row['user_id']))
+            name = member.display_name if member else f'<@{row["user_id"]}>'
+            icon = medals[i] if i < 3 else f'`#{i + 1}`'
+            value = row[col]
+            val_str = (
+                f'{value:.1f}h'    if category == 'hours'
+                else f'{value:,.0f} nm' if category == 'miles'
+                else f'${value:,.0f}'   if category == 'balance'
+                else str(int(value))
+            )
+            lines.append(f'> {icon} **{name}** — {val_str}')
+        embed.description = '\n'.join(lines) + '\n\n-# © British Airways Virtual PF. All rights reserved.'
+    await interaction.response.send_message(embed=embed, files=brand_files())
+
+
+# ─── Error Handler ────────────────────────────────────────────────────────────
+
+
+@bot.tree.error
+async def on_app_command_error(
+    interaction: discord.Interaction, error: app_commands.AppCommandError
+):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message(
+            "❌ You do not have permission to use this command.", ephemeral=True
+        )
+    elif isinstance(error, app_commands.BotMissingPermissions):
+        await interaction.response.send_message(
+            "❌ I do not have the required permissions to do that.", ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            f"❌ An error occurred: {error}", ephemeral=True
+        )
+
+
+# ─── Entry Point ──────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    init_db()
+    bot.run("MTQ5NTM1MDMyODExMDA4ODM3Mw.GTOxoX.Q4c6bofp5tAByzO2N2-22yBPbhz4yPURacFQvg")
